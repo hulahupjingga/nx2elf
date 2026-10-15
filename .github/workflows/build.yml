@@ -1,36 +1,64 @@
-name: build
+name: Build nx2elf for Termux (aarch64)
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
 
 jobs:
-  cmake:
-    # Skip building pull requests from the same repository
-    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-latest, windows-2022]
+  build:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
 
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Build for aarch64 Android
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -eux
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          export CC="$TOOLCHAIN/bin/aarch64-linux-android24-clang"
+          export CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
 
-      - name: Package
-        run: cmake --build build --config Release --target package
+          if [ -f CMakeLists.txt ]; then
+            cmake -B build \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=arm64-v8a \
+              -DANDROID_PLATFORM=android-24 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++"
+            cmake --build build -j"$(nproc)"
+          elif [ -f Makefile ] || [ -f makefile ]; then
+            make -j"$(nproc)" CC="$CC" CXX="$CXX" LDFLAGS="-static-libstdc++"
+          else
+            echo "No CMakeLists.txt or Makefile found in the repo root" >&2
+            ls -la
+            exit 1
+          fi
+
+      - name: Collect binary
+        run: |
+          set -eux
+          mkdir -p out
+          # Find the built executable (name may be nx2elf or nx2elf.out etc.)
+          BIN="$(find . -type f -name 'nx2elf*' -perm -u+x ! -path './out/*' | head -n1)"
+          test -n "$BIN"
+          cp "$BIN" out/nx2elf
+          file out/nx2elf
+          ls -l out/nx2elf
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: nx2elf-${{ matrix.os }}
-          path: build/nx2elf-*.zip
-
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
-        with:
-          files: build/nx2elf-*.zip
+          name: nx2elf-termux-aarch64
+          path: out/nx2elf
